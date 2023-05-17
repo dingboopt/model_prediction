@@ -8,7 +8,10 @@ def evaMLP(d, b, h, s, t):
     k = h
 
     eva_time = op.perf_linear(d, m, n, k)
-
+    print('###########################')
+    # gelu
+    eva_time += op.perf_gelu(d, (s,b,n),(n))
+    print('###########################')
     # second projection
     tmp = n
     n = k
