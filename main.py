@@ -3,6 +3,8 @@ import argparse
 
 def evaMLP(d, b, h, s, t):
     # first projection
+    s -= 1
+
     m = b * s
     n = h * 4 // t
     k = h
@@ -16,9 +18,33 @@ def evaMLP(d, b, h, s, t):
     tmp = n
     n = k
     k = tmp
-    eva_time += op.perf_linear(d, m, n ,k)
+    eva_time += op.perf_linear(d, m, k ,n)
 
     return eva_time
+
+def evaAttention(d, b, h, ah, s, t):
+    s -= 1
+    # np:num_attention_heads_per_partition
+    np = ah // t
+    # hn:hidden_size_per_attention_head
+    hn = h // ah
+
+    # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
+    m = s * b
+    k = h
+    n = np * 3 * hn
+    eva_time = op.perf_linear(d, m, n, k)
+    # raw score: [b * np, sq, hn] [b * np, hn, sk]
+    batch = b * np
+    m = s
+    k = hn
+    n = s
+    eva_time += op.perf_baddbmm(d, batch, m, k, n)
+
+
+    return eva_time
+
+
 
 
 
@@ -34,5 +60,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
 
-
+    print(evaAttention(args.dev, args.mbs, args.hidden, args.atthead, args.sequence, args.tp))
     print(evaMLP(args.dev, args.mbs, args.hidden, args.sequence, args.tp))
