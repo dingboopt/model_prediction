@@ -1,5 +1,6 @@
 import op
 import argparse
+import torch
 
 def evaMLP(d, b, h, s, t):
     # first projection
@@ -41,6 +42,13 @@ def evaAttention(d, b, h, ah, s, t):
     n = s
     eva_time += op.perf_baddbmm(d, batch, m, k, n)
 
+    # attention scores and attention mask [b, np, sq, sk]
+    print(b, np, s, s)
+
+    perf_softmax = op.PerfFusedScaleMaskSoftmax(b, np, s)
+    with torch.cuda.device(d):
+        perf_softmax.warmup()
+        eva_time += perf_softmax.measure_time( with_profile = True)
 
     return eva_time
 
@@ -61,4 +69,4 @@ if __name__ == "__main__":
 
 
     print(evaAttention(args.dev, args.mbs, args.hidden, args.atthead, args.sequence, args.tp))
-    print(evaMLP(args.dev, args.mbs, args.hidden, args.sequence, args.tp))
+    #print(evaMLP(args.dev, args.mbs, args.hidden, args.sequence, args.tp))

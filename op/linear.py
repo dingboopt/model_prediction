@@ -35,9 +35,10 @@ def perf_linear(dev, m, k, n):
             start_events[i].record()
             start_times[i] = datetime.datetime.now()
             z = F.linear(input1, input2)
+            torch.cuda.synchronize()
             end_times[i] = datetime.datetime.now()
             end_events[i].record()
-            torch.cuda.synchronize()
+
         torch.cuda.synchronize()
         times = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
         times_mean = statistics.mean(times)
@@ -55,4 +56,4 @@ def perf_linear(dev, m, k, n):
 
         print(times)
         # milisecond
-        return times_mean
+        return mannul_meaured_times[0]
