@@ -12,6 +12,25 @@ import pandas as pd
 
 import sys
 import os
+from .op import PerfOP
+
+class PerfLinear(PerfOP):
+    def __init__(self, m, k, n):
+        super(PerfLinear, self).__init__()
+        self.m = m
+        self.k = k
+        self.n = n
+        self.input1 = None
+        self.input2 = None
+
+    def prepare_data(self):
+        cuda = torch.cuda.current_device()
+        self.input1 = torch.rand((self.m, self.k), device=cuda, dtype=torch.bfloat16)
+        self.input2 = torch.rand((self.n, self.k), device=cuda, dtype=torch.bfloat16)
+
+    def run_kernel(self):
+        out = F.linear(self.input1, self.input2)
+
 
 def perf_linear(dev, m, k, n):
     with torch.cuda.device(dev):

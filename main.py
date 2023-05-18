@@ -24,6 +24,7 @@ def evaMLP(d, b, h, s, t):
     return eva_time
 
 def evaAttention(d, b, h, ah, s, t):
+    eva_time = 0
     s -= 1
     # np:num_attention_heads_per_partition
     np = ah // t
@@ -34,21 +35,33 @@ def evaAttention(d, b, h, ah, s, t):
     m = s * b
     k = h
     n = np * 3 * hn
-    eva_time = op.perf_linear(d, m, n, k)
+
+
+
+
+    perf_linear = op.PerfLinear(m, k, n)
+    with torch.cuda.device(d):
+        perf_linear.warmup()
+        print(perf_linear.measure_time())
+        eva_time += perf_linear.measure_time()
+
+    # attention scores and attention mask [b, np, sq, sk]
     # raw score: [b * np, sq, hn] [b * np, hn, sk]
     batch = b * np
     m = s
     k = hn
     n = s
-    eva_time += op.perf_baddbmm(d, batch, m, k, n)
 
-    # attention scores and attention mask [b, np, sq, sk]
-    print(b, np, s, s)
+    perf_baddbmm = op.PerfBaddBmm(batch, m, k, n)
+    with torch.cuda.device(d):
+        perf_baddbmm.warmup()
+        print(perf_baddbmm.measure_time())
+        eva_time += perf_baddbmm.measure_time(with_profile = True)
 
     perf_softmax = op.PerfFusedScaleMaskSoftmax(b, np, s)
     with torch.cuda.device(d):
         perf_softmax.warmup()
-        eva_time += perf_softmax.measure_time( with_profile = True)
+        eva_time += perf_softmax.measure_time( )
 
     return eva_time
 
