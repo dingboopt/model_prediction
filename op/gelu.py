@@ -44,7 +44,6 @@ def perf_gelu(dev, input, bias):
         times_mean = statistics.mean(times)
         mannul_meaured_times = [(end-start).total_seconds() * 1000 for start,end in zip(start_times, end_times)]
         mannul_meaured_times_mean = statistics.mean(mannul_meaured_times)
-        print(times)
-        print(mannul_meaured_times)
+
         # milisecond
         return mannul_meaured_times_mean

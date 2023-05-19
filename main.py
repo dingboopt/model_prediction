@@ -9,17 +9,21 @@ def evaMLP(d, b, h, s, t):
     m = b * s
     n = h * 4 // t
     k = h
-
-    eva_time = op.perf_linear(d, m, n, k)
-    print('###########################')
+    eva_time = 0
+    perf_linear = op.PerfLinear(m, k, n)
+    with torch.cuda.device(d):
+        perf_linear.warmup()
+        eva_time += perf_linear.measure_time()
     # gelu
     eva_time += op.perf_gelu(d, (s,b,n),(n))
-    print('###########################')
     # second projection
     tmp = n
     n = k
     k = tmp
-    eva_time += op.perf_linear(d, m, k ,n)
+    perf_linear = op.PerfLinear(m, k, n)
+    with torch.cuda.device(d):
+        perf_linear.warmup()
+        eva_time += perf_linear.measure_time()
 
     return eva_time
 
@@ -36,13 +40,9 @@ def evaAttention(d, b, h, ah, s, t):
     k = h
     n = np * 3 * hn
 
-
-
-
     perf_linear = op.PerfLinear(m, k, n)
     with torch.cuda.device(d):
         perf_linear.warmup()
-        print(perf_linear.measure_time())
         eva_time += perf_linear.measure_time()
 
     # attention scores and attention mask [b, np, sq, sk]
@@ -55,19 +55,53 @@ def evaAttention(d, b, h, ah, s, t):
     perf_baddbmm = op.PerfBaddBmm(batch, m, k, n)
     with torch.cuda.device(d):
         perf_baddbmm.warmup()
-        print(perf_baddbmm.measure_time())
-        eva_time += perf_baddbmm.measure_time(with_profile = True)
+        eva_time += perf_baddbmm.measure_time()
 
     perf_softmax = op.PerfFusedScaleMaskSoftmax(b, np, s)
     with torch.cuda.device(d):
         perf_softmax.warmup()
         eva_time += perf_softmax.measure_time( )
 
+    # dropout [b, np, sq, sk]
+    perf = op.PerfDropout((b, np, s, s))
+
+    with torch.cuda.device(d):
+        perf.warmup()
+        eva_time += perf.measure_time()
+
+
+    # context(kq * v) [b*np, s, s] [b*np, s, hn]
+    perf = op.PerfBmm(batch, s, s , hn)
+    with torch.cuda.device(d):
+        perf.warmup()
+        eva_time += perf.measure_time()
+
+    perf = op.PerfLinear(b * s, hn * np, h)
+
+    with torch.cuda.device(d):
+        perf.warmup()
+        eva_time += perf.measure_time()
+
     return eva_time
 
 
+def evaInputLayerNorm(d, b, h, s):
+    perf = op.PerfFusedLayerNorm(b, h, s)
 
+    with torch.cuda.device(d):
+        perf.warmup()
+        eva_time = perf.measure_time()
 
+    return eva_time
+
+def evaBiasDropoutAddFused(d, b, h, s):
+    perf = op.PerfBiasDropoutAddFused(b, h, s)
+
+    with torch.cuda.device(d):
+        perf.warmup()
+        eva_time = perf.measure_time()
+
+    return eva_time
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Cost Model for LLM(decoder only).')
@@ -80,6 +114,25 @@ if __name__ == "__main__":
     parser.add_argument('--layer', type=int, help='the number of layers')
     args = parser.parse_args()
 
+    # checkpointing decoder layer: input layernorm + attention + residual(bias add dropout residual) + layernorm + mlp + add&norm
+    checkpoint_layer_time = 0
+    eva_time = evaInputLayerNorm(args.dev, args.mbs, args.hidden, args.sequence)
+    print(f'evaInputLayerNorm is {eva_time} ms')
+    checkpoint_layer_time += eva_time * 3
 
-    print(evaAttention(args.dev, args.mbs, args.hidden, args.atthead, args.sequence, args.tp))
-    #print(evaMLP(args.dev, args.mbs, args.hidden, args.sequence, args.tp))
+    eva_time = evaAttention(args.dev, args.mbs, args.hidden, args.atthead, args.sequence, args.tp)
+    checkpoint_layer_time += eva_time
+    print(f'evaAttention is {eva_time} ms')
+
+    eva_time = evaBiasDropoutAddFused(args.dev, args.mbs, args.hidden, args.sequence)
+    checkpoint_layer_time += eva_time*2
+    print(f'evaBiasDropoutAddFused is {eva_time} ms')
+
+    eva_time = evaMLP(args.dev, args.mbs, args.hidden, args.sequence, args.tp)
+    print(f'evaMLP is {eva_time} ms')
+    checkpoint_layer_time += eva_time
+
+    print(f'total checkpointing forward time is {checkpoint_layer_time}')
+
+
+
