@@ -133,14 +133,28 @@ def cal_flops(b, h, ah, s, t):
     flops['flops:attention:QKV'] = b * s * h / t * 3 * h * 2
     flops['flops:attention:QK'] = b * ah / t * s * s * h / ah * 2
     flops['flops:attention:value'] = b * ah / t * s * s * h / ah * 2
-    flops['flops:attention:projection'] = b * s * h * h / t
     flops['flops:attention:attention'] = flops['flops:attention:QKV'] + flops['flops:attention:QK'] + flops['flops:attention:value']
+    flops['flops:attention:projection'] = b * s * h * h / t * 2
+    flops['flops:mlp:h24h'] = b * s * h * 4 * h / t  * 2
+    flops['flops:mlp:4h2h'] = b * s * h * 4 * h / t * 2
+    flops['flops:mlp'] = flops['flops:mlp:h24h'] + flops['flops:mlp:4h2h']
+    flops['flops:total'] = flops['flops:attention:attention'] +flops['flops:attention:projection'] + flops['flops:mlp']
     return flops
 
 def cal_sol(flops, time):
     sol = {}
     sol['sol:attention:attention'] = flops['flops:attention:attention'] / time['attention:attention'] * 10**3 / 10**12 / 312
+    sol['sol:attention:projection'] = flops['flops:attention:projection'] / time['attention:projection'] * 10**3 / 10**12 / 312
+    sol['sol:mlp'] = flops['flops:mlp']/time['mlp'] * 10**3 / 10**12 / 312
+    sol['sol:total'] = flops['flops:total']/time['total_time'] * 10**3 / 10**12 / 312
     return sol
+
+def cal_percentage(time):
+    result = {}
+    result['per:attention:attention'] = time['attention:attention'] / time ['total_time']
+    result['per:attention:projection'] = time['attention:projection'] / time ['total_time']
+    result['per:mlp'] = time['mlp'] / time ['total_time']
+    return result
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Cost Model for LLM(decoder only).')
@@ -154,12 +168,14 @@ if __name__ == "__main__":
     parser.add_argument('--csv_filename', type=str, help='the cvs file name to store result')
     args = parser.parse_args()
 
-    result = {}
-    result['mbs'] = args.mbs
-    result['hidden size'] = args.hidden
-    result['sequence length'] = args.sequence
-    result['num of heads'] = args.atthead
-    result['num of tp'] = args.tp
+    hyperparams = {}
+    hyperparams['mbs'] = args.mbs
+    hyperparams['hidden size'] = args.hidden
+    hyperparams['sequence length'] = args.sequence
+    hyperparams['num of heads'] = args.atthead
+    hyperparams['num of tp'] = args.tp
+
+    measured_times = {}
     # checkpointing decoder layer: input layernorm + attention + residual(bias add dropout residual) + layernorm + mlp + add
     checkpoint_layer_time = 0
     eva_time = evaInputLayerNorm(args.dev, args.mbs, args.hidden, args.sequence)
@@ -168,23 +184,15 @@ if __name__ == "__main__":
 
     eva_time, detail_time = evaAttention(args.dev, args.mbs, args.hidden, args.atthead, args.sequence, args.tp)
     checkpoint_layer_time += eva_time
-    result['attention'] = eva_time
-    result['attention:QKV'] = detail_time['QKV']
-    result['attention:QK'] = detail_time['raw_attention']
-    result['attention:softmax'] = detail_time['softmax']
-    result['attention:dropout'] = detail_time['dropout']
-    result['attention:value'] = detail_time['context_value']
-    result['attention:projection'] = detail_time['projection']
-
-    result['attention:attention'] = result['attention:QKV'] + result['attention:QK'] + result['attention:softmax'] + result['attention:dropout'] + result['attention:value']
-    
-    ### FLOPS and SOL (312 tflops tensor core)
-    flops = cal_flops(args.mbs, args.hidden, args.atthead, args.sequence, args.tp)
-    sol = cal_sol(flops, result)
-
-    result |= flops | sol
-    print(f'result is {result}')
-    
+    measured_times['attention'] = eva_time
+    measured_times['attention:QKV'] = detail_time['QKV']
+    measured_times['attention:QK'] = detail_time['raw_attention']
+    measured_times['attention:softmax'] = detail_time['softmax']
+    measured_times['attention:dropout'] = detail_time['dropout']
+    measured_times['attention:value'] = detail_time['context_value']
+    measured_times['attention:projection'] = detail_time['projection']
+    # only attention{QKV--->context value}
+    measured_times['attention:attention'] = measured_times['attention:QKV'] + measured_times['attention:QK'] + measured_times['attention:softmax'] + measured_times['attention:dropout'] + measured_times['attention:value']
     
     print(f'evaAttention is {eva_time} ms, detial time is {detail_time}')
 
@@ -193,15 +201,22 @@ if __name__ == "__main__":
     print(f'evaBiasDropoutAddFused is {eva_time} ms')
 
     eva_time = evaMLP(args.dev, args.mbs, args.hidden, args.sequence, args.tp)
-    result['MLP'] = eva_time
-    print(f'evaMLP is {eva_time} ms')
     checkpoint_layer_time += eva_time
-
+    measured_times['mlp'] = eva_time
+    print(f'evaMLP is {eva_time} ms')
     print(f'total checkpointing forward time is {checkpoint_layer_time}')
-
     # logging into csv file
-    result['total time(ms)'] = checkpoint_layer_time
+    measured_times['total_time'] = checkpoint_layer_time
+    ### FLOPS and SOL (312 tflops tensor core)
+    flops = cal_flops(args.mbs, args.hidden, args.atthead, args.sequence, args.tp)
+    sol = cal_sol(flops, measured_times)
+    time_percentage = cal_percentage(measured_times)
 
+    result = {}
+    #result |= flops | sol
+    result = hyperparams |time_percentage| sol
+    print(f'result is {result}')
+    checkpoint_layer_time += eva_time
     if args.csv_filename is None:
         sys.exit(0)
     
