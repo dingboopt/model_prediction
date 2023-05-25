@@ -18,7 +18,7 @@ def evaMLP(d, b, h, s, t):
         eva_time += perf_linear.measure_time()
         print(f'hto4h time is {eva_time}')
     # gelu
-    eva_time += op.perf_gelu(d, (s,b,n),(n))
+    #eva_time += op.perf_gelu(d, (s,b,n),(n))
     # second projection
     tmp = n
     n = k
@@ -215,6 +215,7 @@ if __name__ == "__main__":
     result = {}
     #result |= flops | sol
     result = hyperparams |time_percentage| sol
+    #result = hyperparams | sol
     print(f'result is {result}')
     checkpoint_layer_time += eva_time
     if args.csv_filename is None:

@@ -1,6 +1,5 @@
 import torch
-from megatron.model.fused_layer_norm import FusedLayerNormAffineFunction
-from megatron.model.fused_layer_norm import  MixedFusedLayerNorm
+
 import torch.nn.functional as F
 import datetime
 import statistics

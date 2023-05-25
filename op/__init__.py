@@ -1,5 +1,4 @@
 from .linear import perf_linear
-from .gelu import perf_gelu
 from .fused_softmax import PerfFusedScaleMaskSoftmax
 from .linear import PerfLinear
 from .baddbmm import PerfBaddBmm
@@ -7,3 +6,4 @@ from .dropout import PerfDropout
 from .bmm import PerfBmm
 from .fused_layernorm import PerfFusedLayerNorm
 from .bias_dropout_add_fused import PerfBiasDropoutAddFused
+from .flash_attention import PerfFlashAttention
