@@ -1,16 +1,23 @@
 import torch
 from .op import PerfOP
+try:
 # Lets explore the speed of each of the 3 implementations
-from torch.backends.cuda import sdp_kernel, SDPBackend
+    from torch.backends.cuda import sdp_kernel, SDPBackend
+except:
+    print('not support spd(scaled dot product)')
 import torch.nn as nn
 import torch.nn.functional as F
 
 class PerfFlashAttention(PerfOP):
     def __init__(self, b, a, s, h):
         super(PerfFlashAttention, self).__init__()
+        # micro batch
         self.b = b
+        # attention heads
         self.a = a
+        # sequence
         self.s = s
+        # hidden size
         self.h = h
         self.input1 = None
         self.input2 = None
@@ -23,14 +30,16 @@ class PerfFlashAttention(PerfOP):
         self.input3 = torch.rand((self.b, self.a, self.s, self.h), device=cuda, dtype=torch.bfloat16)
 
     def run_kernel(self):
-        # Helpful arguments mapper
-        backend_map = {
-            SDPBackend.MATH: {"enable_math": True, "enable_flash": False, "enable_mem_efficient": False},
-            SDPBackend.FLASH_ATTENTION: {"enable_math": False, "enable_flash": True, "enable_mem_efficient": False},
-            SDPBackend.EFFICIENT_ATTENTION: {
-                "enable_math": False, "enable_flash": False, "enable_mem_efficient": True}
-        }
+        try:
+            # Helpful arguments mapper
+            backend_map = {
+                SDPBackend.MATH: {"enable_math": True, "enable_flash": False, "enable_mem_efficient": False},
+                SDPBackend.FLASH_ATTENTION: {"enable_math": False, "enable_flash": True, "enable_mem_efficient": False},
+                SDPBackend.EFFICIENT_ATTENTION: {
+                    "enable_math": False, "enable_flash": False, "enable_mem_efficient": True}
+            }
 
-        with sdp_kernel(**backend_map[SDPBackend.FLASH_ATTENTION]):
-            F.scaled_dot_product_attention(self.input1, self.input2, self.input3, dropout_p=0.5, is_causal=True)
-
+            with sdp_kernel(**backend_map[SDPBackend.EFFICIENT_ATTENTION]):
+                F.scaled_dot_product_attention(self.input1, self.input2, self.input3, dropout_p=0.5, is_causal=True)
+        except:
+            print('not support spd(scaled dot product)')
