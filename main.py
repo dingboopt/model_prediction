@@ -57,7 +57,7 @@ if __name__ == "__main__":
     arg_string = f'micro batch: {mbs} header:{header} sequence:{sequence} hidden size:{hidden} tp:{tp}'
 
     print(arg_string)
-    output_path= arg_string.replace( ' ', '_').replace('[', '').replace(']', '')+args.csv_filename
+    output_path= arg_string.replace( ' ', '_').replace('[', '').replace(']', '').replace(':', '').replace(',', '')+args.csv_filename
     print(output_path)
 
     for h in hidden:
@@ -66,8 +66,8 @@ if __name__ == "__main__":
                 for b in mbs:
                     for t in tp:
                         if a % t != 0:
-                            print('error : atten head num:{a} cannot be divided by tp num {t}')
-                            raise
+                            print(f'warning : atten head num:{a} cannot be divided by tp num {t}')
+                            continue
                         try:
                             result = get_statistics(args.dev, b, h, s, a, t)
                         except torch.cuda.OutOfMemoryError:

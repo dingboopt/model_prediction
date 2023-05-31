@@ -227,6 +227,7 @@ def cal_flops(b, h, ah, s, t):
 
 def cal_sol(flops, time):
     sol = {}
+    sol['sol:attention:QK'] = flops['flops:attention:QK'] / time['attention:QK'] * 10**3 / 10**12 / 312
     sol['sol:attention:QKV'] = flops['flops:attention:QKV'] / time['attention:QKV'] * 10**3 / 10**12 / 312
     sol['sol:attention:attention'] = flops['flops:attention:attention'] / time['attention:attention'] * 10**3 / 10**12 / 312
     sol['sol:attention:projection'] = flops['flops:attention:projection'] / time['attention:projection'] * 10**3 / 10**12 / 312
@@ -237,6 +238,7 @@ def cal_sol(flops, time):
 def cal_percentage(time):
     result = {}
     result['per:attention:QKV'] = time['attention:QKV'] / time ['total_time']
+    result['per:attention:softmax_dropout'] = (time['attention:softmax']+ time['attention:dropout'])/ time ['total_time']
     result['per:attention:attention'] = time['attention:attention'] / time ['total_time']
     result['per:attention:projection'] = time['attention:projection'] / time ['total_time']
     result['per:mlp'] = time['mlp'] / time ['total_time']
