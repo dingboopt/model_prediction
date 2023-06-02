@@ -97,3 +97,20 @@ class PerfOP(ABC):
             print(f'{self.__class__.__name__} : \n {mannul_meaured_times}')
 
         return mannul_meaured_times_mean
+
+    @abstractmethod
+    def get_flops(self):
+        pass
+
+    @abstractmethod
+    def get_config(self):
+        pass
+
+    def get_metrics(self):
+        self.warmup()
+        eva_time = self.measure_time()
+        flops = self.get_flops()
+        sol = flops / eva_time * 10**3 /10**12/ 312
+        result = self.get_config()
+        result |= {'flops':flops, 'time':eva_time, 'sol':sol}
+        return result

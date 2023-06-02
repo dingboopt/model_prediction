@@ -3,13 +3,13 @@ import op
 import torch
 
 def eva_op(d, op_type, args):
-    if op_type == 'flash_attention':
-        perf = op.PerfFlashAttention(args[0], args[1], args[2], args[3])
+    import importlib
+    module = importlib.import_module('op')
+    class_ = getattr(module, op_type)
+    perf = class_(*args)
     with torch.cuda.device(d):
-        perf.warmup()
-        eva_time = perf.measure_time()
-
-    return eva_time
+        result = perf.get_metrics()
+    return result
 
 def cal_flops(b, h, s, t):
     # only cal matrix op

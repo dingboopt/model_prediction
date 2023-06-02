@@ -7,3 +7,8 @@ from .bmm import PerfBmm
 from .fused_layernorm import PerfFusedLayerNorm
 from .bias_dropout_add_fused import PerfBiasDropoutAddFused
 from .flash_attention import PerfFlashAttention
+from .flash_attention_triton import PerfFlashAttentionTriton
+from .xformer_attention import PerfXformerAttention
+from .naive_attention import PerfNaiveAttention
+from .hazy_attention import PerfHazyAttention
+from .sdp_attention import PerfSDPAttention
