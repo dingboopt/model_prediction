@@ -14,7 +14,7 @@ class PerfAttentionBase(PerfOP):
         # hidden size
         self.h = h
         # bias or no bias
-        self.bias = 0
+        self.bias = bias
         # dropout or no dropout
         self.p = p
         # implementation index

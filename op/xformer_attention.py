@@ -18,26 +18,50 @@ class PerfXformerAttention(PerfAttentionBase):
 
     def prepare_data(self):
         cuda = torch.cuda.current_device()
-        self.input1 = torch.rand((self.b, self.s, self.a, self.h), device=cuda, dtype=torch.bfloat16)
-        self.input2 = torch.rand((self.b, self.s, self.a, self.h), device=cuda, dtype=torch.bfloat16)
-        self.input3 = torch.rand((self.b, self.s, self.a, self.h), device=cuda, dtype=torch.bfloat16)
+        #q
+        self.input1 = torch.rand((self.b, self.s, self.a, self.h), device=cuda, dtype=torch.bfloat16,requires_grad=True)
+        #k
+        self.input2 = torch.rand((self.b, self.s, self.a, self.h), device=cuda, dtype=torch.bfloat16,requires_grad=True)
+        #v
+        self.input3 = torch.rand((self.b, self.s, self.a, self.h), device=cuda, dtype=torch.bfloat16,requires_grad=True)
+        #bias
         self.input4 = torch.rand((self.b*self.a, self.s, self.s), device=cuda, dtype=torch.bfloat16)
+        #lse
+        self.input5 = torch.rand((self.b,self.a, self.s  ), device=cuda, dtype=torch.float32,requires_grad=True)
 
     def run_kernel(self):
         # Causal attention
         if self.bias != 0:
-            self.bias = xops.fmha.attn_bias.LowerTriangularMaskWithTensorBias(self.input4) 
+            bias = xops.fmha.attn_bias.LowerTriangularMaskWithTensorBias(self.input4) 
         else:
-            self.bias = xops.fmha.attn_bias.LowerTriangularMask()
+            bias = xops.fmha.attn_bias.LowerTriangularMask()
 
         if self.p != 0:
-            self.p = 0.1
+            p = 0.1
         else:
-            self.p = 0
+            p = 0
+
+
 
         y = xops.memory_efficient_attention(
             self.input1, self.input2, self.input3,
-            attn_bias=self.bias,
-            p = self.p,
+            attn_bias=bias,
+            p = p,
+            scale=1.4,
             op=self.op
         )
+        
+        y[0][0][0][0].backward()
+        
+#        z = xops.memory_efficient_attention_forward_requires_grad(self.input1, self.input2, self.input3,
+#            attn_bias=bias,
+#            p = p,
+#            scale=1.4,
+#            op=self.op[0])
+#
+#        z = xops.memory_efficient_attention_backward(self.input1,self.input1, self.input5, self.input1, self.input2, self.input3,
+#            attn_bias=bias,
+#            p = p,
+#            scale=1.4,
+#            op=self.op[1])
+

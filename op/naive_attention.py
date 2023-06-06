@@ -5,21 +5,21 @@ from .attention_base import PerfAttentionBase
 
 class PerfNaiveAttention(PerfAttentionBase):
     def __init__(self, b, a, s, h, bias, p, op_index):
-        if bias == 0:
-            print('bias should not be zero')
-            raise
         super(PerfNaiveAttention, self).__init__(b, a, s, h, bias, p, op_index)
 
     def prepare_data(self):
         cuda = torch.cuda.current_device()
-        self.input1 = torch.rand((self.b * self.a, self.s, self.h), device=cuda, dtype=torch.bfloat16)
-        self.input2 = torch.rand((self.b * self.a, self.h, self.s), device=cuda, dtype=torch.bfloat16)
-        self.bias = torch.rand((self.b * self.a , 1, self.s), device=cuda, dtype=torch.bfloat16)
+        self.input1 = torch.rand((self.b * self.a, self.s, self.h), device=cuda, dtype=torch.bfloat16,requires_grad=True)
+        self.input2 = torch.rand((self.b * self.a, self.h, self.s), device=cuda, dtype=torch.bfloat16,requires_grad=True)
+        self.bias_input = torch.rand((self.b * self.a , 1, self.s), device=cuda, dtype=torch.bfloat16)
         self.mask = torch.rand((1, self.s, self.s), device=cuda) < 0.9
-        self.input3 = torch.rand((self.b * self.a, self.s, self.h), device=cuda, dtype=torch.bfloat16)
+        self.input3 = torch.rand((self.b * self.a, self.s, self.h), device=cuda, dtype=torch.bfloat16,requires_grad=True)
 
     def run_kernel(self):
-        tmp = torch.baddbmm(self.bias, self.input1, self.input2, beta=1, alpha=(1.0/0.1))
+        if self.bias:
+            tmp = torch.baddbmm(self.bias_input, self.input1, self.input2, beta=1, alpha=(1.0/0.1))
+        else:
+            tmp = torch.baddbmm(self.bias_input, self.input1, self.input2, beta=0, alpha=(1.0/0.1))
         # current setting bf16->fp32
         tmp = tmp.float()
         # scale
@@ -33,4 +33,5 @@ class PerfNaiveAttention(PerfAttentionBase):
         if self.p != 0:
             tmp = torch.nn.Dropout(0.3)(tmp)
         out = torch.bmm(tmp, self.input3)
+        out[0][0][0].backward()
 

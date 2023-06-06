@@ -19,32 +19,37 @@ class PerfHazyAttention(PerfAttentionBase):
         else:
             self.p = 0
         if self.op_index == 0:
+            if bias !=0 :
+                print('cutlas does not support bias {bias}')
+                raise
             self.op = FlashAttention(softmax_scale = 1.4, attention_dropout=self.p).forward
         else:
+            if p != 0:
+                print('Triton does not support dropout>0')
+                raise
             self.op = flash_attn_func
         
-        if op_index == 0:
-            if p !=0 or bias !=0 :
-                print('cutlas does not support dropout{p} or bias{bias}')
-                raise
+
 
 
     def prepare_data(self):
         cuda = torch.cuda.current_device()
         if self.op_index == 0:
-            self.input1 = torch.rand((self.b , self.s,3,  self.a, self.h), device=cuda, dtype=torch.bfloat16)
+            self.input1 = torch.rand((self.b , self.s,3,  self.a, self.h), device=cuda, dtype=torch.bfloat16,requires_grad=True)
         else:
-            self.input1 = torch.rand((self.b , self.s, self.a, self.h), device=cuda, dtype=torch.bfloat16)
-            self.input2 = torch.rand((self.b , self.s, self.a, self.h), device=cuda, dtype=torch.bfloat16)
-            self.input3 = torch.rand((1 , self.a , 1, self.s), device=cuda, dtype=torch.bfloat16)
-            self.input3 = torch.rand((self.b , self.s, self.a, self.h), device=cuda, dtype=torch.bfloat16)
-
+            self.input1 = torch.rand((self.b , self.s, self.a, self.h), device=cuda, dtype=torch.bfloat16,requires_grad=True)
+            self.input2 = torch.rand((self.b , self.s, self.a, self.h), device=cuda, dtype=torch.bfloat16,requires_grad=True)
+            
+            self.input3 = torch.rand((self.b , self.s, self.a, self.h), device=cuda, dtype=torch.bfloat16,requires_grad=True)
+            self.input4 = torch.rand((self.b , self.a, self.s, self.s), device=cuda, dtype=torch.bfloat16)
+            self.input4 = torch.rand((1, self.a, self.s, self.s), device=cuda, dtype=torch.bfloat16)
     def run_kernel(self):
         if self.op_index == 0:
-            self.op(self.input1, key_padding_mask=None, causal=True, cu_seqlens=None, max_s=None, need_weights=False)
+            y=self.op(self.input1, key_padding_mask=None, causal=True, cu_seqlens=None, max_s=None, need_weights=False)
         else:
             if self.bias !=0:
-                self.op(self.input1, self.input2, self.input3, self.input3, True, self.p)
+                y=self.op(self.input1, self.input2, self.input3, self.input4, True, 1.4)
             else:
-                self.op(self.input1, self.input2, self.input3, None, True, self.p)
+                y=self.op(self.input1, self.input2, self.input3, None, True, 1.4)
+        y[0][0][0][0].backward()
     
