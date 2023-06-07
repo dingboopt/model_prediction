@@ -3,7 +3,7 @@ from .op import PerfOP
 
 
 class PerfAttentionBase(PerfOP):
-    def __init__(self, b, a, s, h, bias=0, p=0, op_index=0):
+    def __init__(self, b, a, s, h, bias=0, p=0, op_index=0, both_fw_bw=0):
         super(PerfAttentionBase, self).__init__()
         # micro batch
         self.b = b
@@ -19,11 +19,12 @@ class PerfAttentionBase(PerfOP):
         self.p = p
         # implementation index
         self.op_index = op_index
+        self.both_fw_bw = both_fw_bw
 
     def get_flops(self):
         # omit softmax and dropout etc. only qk +qk*v
         flops = self.b * self.a * self.s * self.s *self.h * 4
-        return flops
+        return flops*3 if self.both_fw_bw  else flops
 
     def get_config(self):    
         result = {'batch': self.b,'head':self.a, 'seq':self.s, 'hidden':self.h}

@@ -4,8 +4,8 @@ from .attention_base import PerfAttentionBase
 
 
 class PerfNaiveAttention(PerfAttentionBase):
-    def __init__(self, b, a, s, h, bias, p, op_index):
-        super(PerfNaiveAttention, self).__init__(b, a, s, h, bias, p, op_index)
+    def __init__(self, b, a, s, h, bias, p, op_index, both_fw_bw):
+        super(PerfNaiveAttention, self).__init__(b, a, s, h, bias, p, op_index, both_fw_bw)
 
     def prepare_data(self):
         cuda = torch.cuda.current_device()
@@ -33,5 +33,6 @@ class PerfNaiveAttention(PerfAttentionBase):
         if self.p != 0:
             tmp = torch.nn.Dropout(0.3)(tmp)
         out = torch.bmm(tmp, self.input3)
-        out[0][0][0].backward()
+        if self.both_fw_bw:
+            out[0][0][0].backward()
 

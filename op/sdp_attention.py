@@ -10,8 +10,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class PerfSDPAttention(PerfAttentionBase):
-    def __init__(self, b, a, s, h, bias, p, op_index):
-        super(PerfSDPAttention, self).__init__(b, a, s, h, bias, p, op_index)
+    def __init__(self, b, a, s, h, bias, p, op_index, both_fw_bw):
+        super(PerfSDPAttention, self).__init__(b, a, s, h, bias, p, op_index, both_fw_bw)
         # Helpful arguments mapper
         backend_map = {
             SDPBackend.MATH: {"enable_math": True, "enable_flash": False, "enable_mem_efficient": False},
@@ -25,10 +25,10 @@ class PerfSDPAttention(PerfAttentionBase):
         if self.bias !=0:
             print('SDP currently does not support bias')
             raise
-        if self.p !=0 :
-            self.p = 0.1
-        else:
-            self.p = 0
+        if both_fw_bw == 1:
+            print('SDP currently does not support both fw and bw')
+            raise
+
 
     def prepare_data(self):
         cuda = torch.cuda.current_device()
@@ -37,5 +37,6 @@ class PerfSDPAttention(PerfAttentionBase):
         self.input3 = torch.rand((self.b, self.a, self.s, self.h), device=cuda, dtype=torch.bfloat16)
 
     def run_kernel(self):
+        p = 0.1 if self.p else 0
         with sdp_kernel(**self.opt):
-            F.scaled_dot_product_attention(self.input1, self.input2, self.input3, dropout_p=self.p, is_causal=True)
+            F.scaled_dot_product_attention(self.input1, self.input2, self.input3, dropout_p=p, is_causal=True)

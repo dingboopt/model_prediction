@@ -12,8 +12,8 @@ except:
 
 
 class PerfHazyAttention(PerfAttentionBase):
-    def __init__(self, b, a, s, h, bias, p, op_index):
-        super(PerfHazyAttention, self).__init__(b, a, s, h, bias, p, op_index)
+    def __init__(self, b, a, s, h, bias, p, op_index, both_fw_bw):
+        super(PerfHazyAttention, self).__init__(b, a, s, h, bias, p, op_index, both_fw_bw)
         if self.p != 0:
             self.p = 0.1
         else:
@@ -22,7 +22,7 @@ class PerfHazyAttention(PerfAttentionBase):
             if bias !=0 :
                 print('cutlas does not support bias {bias}')
                 raise
-            self.op = FlashAttention(softmax_scale = 1.4, attention_dropout=self.p).forward
+            self.op = FlashAttention(softmax_scale = 1.4, attention_dropout=self.p)
         else:
             if p != 0:
                 print('Triton does not support dropout>0')
@@ -45,11 +45,13 @@ class PerfHazyAttention(PerfAttentionBase):
             self.input4 = torch.rand((1, self.a, self.s, self.s), device=cuda, dtype=torch.bfloat16)
     def run_kernel(self):
         if self.op_index == 0:
-            y=self.op(self.input1, key_padding_mask=None, causal=True, cu_seqlens=None, max_s=None, need_weights=False)
+            #y=self.op.apply(self.input1, key_padding_mask=None, causal=True, cu_seqlens=None, max_s=None, need_weights=False)
+            y=self.op(self.input1,                  None,        True,            None,       None,              False)[0]
         else:
             if self.bias !=0:
                 y=self.op(self.input1, self.input2, self.input3, self.input4, True, 1.4)
             else:
                 y=self.op(self.input1, self.input2, self.input3, None, True, 1.4)
-        y[0][0][0][0].backward()
+        if self.both_fw_bw:
+            y[0][0][0][0].backward()
     

@@ -7,8 +7,8 @@ class PerfXformerAttention(PerfAttentionBase):
 #Input tensors must be in format [B, M, H, K], where B is the batch size, M the 
 #sequence length, H the number of heads, and K the embeding size per head
 #If inputs have dimension 3, it is assumed that the dimensions are [B, M, K] and H=1
-    def __init__(self, b, a, s, h, bias, p, op_index):
-        super(PerfXformerAttention, self).__init__(b, a, s, h, bias, p, op_index)
+    def __init__(self, b, a, s, h, bias, p, op_index, both_fw_bw):
+        super(PerfXformerAttention, self).__init__(b, a, s, h, bias, p, op_index, both_fw_bw)
         ops = [(xops.fmha.cutlass.FwOp, xops.fmha.cutlass.BwOp),\
         (xops.fmha.flash.FwOp, xops.fmha.flash.BwOp),\
         (xops.fmha.triton.FwOp, xops.fmha.triton.BwOp),\
@@ -50,8 +50,8 @@ class PerfXformerAttention(PerfAttentionBase):
             scale=1.4,
             op=self.op
         )
-        
-        y[0][0][0][0].backward()
+        if self.both_fw_bw:        
+            y[0][0][0][0].backward()
         
 #        z = xops.memory_efficient_attention_forward_requires_grad(self.input1, self.input2, self.input3,
 #            attn_bias=bias,
