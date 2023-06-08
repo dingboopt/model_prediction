@@ -24,9 +24,7 @@ class PerfHazyAttention(PerfAttentionBase):
                 raise
             self.op = FlashAttention(softmax_scale = 1.4, attention_dropout=self.p)
         else:
-            if p != 0:
-                print('Triton does not support dropout>0')
-                raise
+
             self.op = flash_attn_func
         
 
@@ -49,9 +47,9 @@ class PerfHazyAttention(PerfAttentionBase):
             y=self.op(self.input1,                  None,        True,            None,       None,              False)[0]
         else:
             if self.bias !=0:
-                y=self.op(self.input1, self.input2, self.input3, self.input4, True, 1.4)
+                y=self.op(self.input1, self.input2, self.input3, self.input4, True, 1.4, self.p)
             else:
-                y=self.op(self.input1, self.input2, self.input3, None, True, 1.4)
+                y=self.op(self.input1, self.input2, self.input3, None, True, 1.4, self.p)
         if self.both_fw_bw:
             y[0][0][0][0].backward()
     
