@@ -205,8 +205,36 @@ class ParallelAttention(MegatronModule):
         if self.position_embedding_type == PositionEmbeddingType.rotary:
             self.rotary_emb = RotaryEmbedding(self.hidden_size_per_attention_head, precision=args.params_dtype)
 
+    
+    def flash_attention(self, query_layer, key_layer, value_layer, matmul_result, output_size):
+        from .flash_attention_triton_imp import flash_attn_func
+        # [sq, b, np, hn] -> [sq, b * np, hn]
+        query_layer = query_layer.view(output_size[2],
+                                       output_size[0] , output_size[1], -1)
+        # [sk, b, np, hn] -> [sk, b * np, hn]
+        key_layer = key_layer.view(output_size[3],
+                                   output_size[0] ,  output_size[1], -1)
+        # [sq, b, np, hn] -> [b, sq, np, hn]
+        query_layer = query_layer.transpose(0, 1).contiguous()
+        # [sk, b, np, hn] -> [b, sk, np, hn]
+        key_layer = key_layer.transpose(0, 1).contiguous()
+        # [sk, b, np, hn] -> [b, sk, np, hn]
+        value_layer = value_layer.transpose(0, 1).contiguous()
+
+        matmul_result = matmul_result.view(output_size[0],-1,matmul_result.shape[1],matmul_result.shape[2]).contiguous()
+        matmul_result = matmul_result[:,:,:,:]
+
+        context_layer = flash_attn_func(query_layer, key_layer, value_layer,matmul_result, True,1./self.norm_factor)
+        
+
+        # =========================
+        # Context layer. [sq, b, hp]
+        # =========================
+        # [b, sq, np, hn] -> [b, np, sq, hn]
+        context_layer = context_layer.transpose(1,2).contiguous()
+        return context_layer
     def forward(self, hidden_states, attention_mask, layer_past=None,
-                get_key_value=False, encoder_output=None, alibi=None):
+                get_key_value=False, encoder_output=None, alibi=None, use_flash_att=True):
         # hidden_states: [sq, b, h]
 
         # =====================
@@ -302,88 +330,91 @@ class ParallelAttention(MegatronModule):
             cos, sin = self.rotary_emb(value_layer, seq_len=seq_len)
             query_layer, key_layer = apply_rotary_fn(query_layer, key_layer, cos, sin, offset=offset)
 
-        # Raw attention scores. [b * np, sq, sk]
-        if alibi is None:
-            matmul_result = torch.baddbmm(
-                matmul_result,
-                query_layer.transpose(0, 1),   # [b * np, sq, hn]
-                key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
-                beta=0.0, alpha=(1.0/self.norm_factor))
+        if use_flash_att:
+            context_layer = self.flash_attention(query_layer, key_layer, value_layer, matmul_result, output_size)
         else:
-            if not hasattr(self, "logged_alibi"):
-                logger.debug("Using Alibi.")
-                self.logged_alibi = True
-
-            if self.apply_query_key_layer_scaling:
-                beta = 1.0 / self.layer_number
+            # Raw attention scores. [b * np, sq, sk]
+            if alibi is None:
+                matmul_result = torch.baddbmm(
+                    matmul_result,
+                    query_layer.transpose(0, 1),   # [b * np, sq, hn]
+                    key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
+                    beta=0.0, alpha=(1.0/self.norm_factor))
             else:
-                beta = 1.0
-
-            matmul_result = torch.baddbmm(
-                matmul_result,
-                query_layer.transpose(0, 1),  # [b * np, sq, hn]
-                key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
-                beta=beta, alpha=(1.0 / self.norm_factor))
-
-        # change view to [b, np, sq, sk]
-        attention_scores = matmul_result.view(*output_size)
-        # ==================================================
-        # Update attention mask for inference. [b, np, sq, sk]
-        # ==================================================
-
-        if get_key_value:
-            with torch.no_grad():
-                # TODO @thomasw21 Handle case where `attention_mask` is None
-                if layer_past is not None:
-                    attention_mask = attention_mask[
-                        ...,
-                        attention_scores.size(3) - 1,
-                        :attention_scores.size(3)].unsqueeze(2)
+                if not hasattr(self, "logged_alibi"):
+                    logger.debug("Using Alibi.")
+                    self.logged_alibi = True
+    
+                if self.apply_query_key_layer_scaling:
+                    beta = 1.0 / self.layer_number
                 else:
-                    attention_mask = attention_mask[
-                        ...,
-                        :attention_scores.size(3),
-                        :attention_scores.size(3)]
-
-        # ===========================
-        # Attention probs and dropout
-        # ===========================
-
-        # attention scores and attention mask [b, np, sq, sk]
-        attention_probs = self.scale_mask_softmax(attention_scores,
-                                                  attention_mask)
-
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        with mpu.get_cuda_rng_tracker().fork():
-            attention_probs = self.attention_dropout(attention_probs)
-
-        # =========================
-        # Context layer. [sq, b, hp]
-        # =========================
-
-        # value_layer -> context layer.
-        # [sk, b, np, hn] --> [b, np, sq, hn]
-
-        # context layer shape: [b, np, sq, hn]
-        output_size = (value_layer.size(1),
-                       value_layer.size(2),
-                       query_layer.size(0),
-                       value_layer.size(3))
-
-        # change view [sk, b * np, hn]
-        value_layer = value_layer.view(value_layer.size(0),
-                                       output_size[0] * output_size[1], -1)
-
-        # change view [b * np, sq, sk]
-        attention_probs = attention_probs.view(output_size[0] * output_size[1],
-                                               output_size[2], -1)
-
-        # matmul: [b * np, sq, hn]
-        context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
-
-        # change view [b, np, sq, hn]
-        context_layer = context_layer.view(*output_size)
+                    beta = 1.0
+    
+                matmul_result = torch.baddbmm(
+                    matmul_result,
+                    query_layer.transpose(0, 1),  # [b * np, sq, hn]
+                    key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
+                    beta=beta, alpha=(1.0 / self.norm_factor))
+    
+            # change view to [b, np, sq, sk]
+            attention_scores = matmul_result.view(*output_size)
+            # ==================================================
+            # Update attention mask for inference. [b, np, sq, sk]
+            # ==================================================
+    
+            if get_key_value:
+                with torch.no_grad():
+                    # TODO @thomasw21 Handle case where `attention_mask` is None
+                    if layer_past is not None:
+                        attention_mask = attention_mask[
+                            ...,
+                            attention_scores.size(3) - 1,
+                            :attention_scores.size(3)].unsqueeze(2)
+                    else:
+                        attention_mask = attention_mask[
+                            ...,
+                            :attention_scores.size(3),
+                            :attention_scores.size(3)]
+    
+            # ===========================
+            # Attention probs and dropout
+            # ===========================
+    
+            # attention scores and attention mask [b, np, sq, sk]
+            attention_probs = self.scale_mask_softmax(attention_scores,
+                                                      attention_mask)
+    
+            # This is actually dropping out entire tokens to attend to, which might
+            # seem a bit unusual, but is taken from the original Transformer paper.
+            with mpu.get_cuda_rng_tracker().fork():
+                attention_probs = self.attention_dropout(attention_probs)
+    
+            # =========================
+            # Context layer. [sq, b, hp]
+            # =========================
+    
+            # value_layer -> context layer.
+            # [sk, b, np, hn] --> [b, np, sq, hn]
+    
+            # context layer shape: [b, np, sq, hn]
+            output_size = (value_layer.size(1),
+                           value_layer.size(2),
+                           query_layer.size(0),
+                           value_layer.size(3))
+    
+            # change view [sk, b * np, hn]
+            value_layer = value_layer.view(value_layer.size(0),
+                                           output_size[0] * output_size[1], -1)
+    
+            # change view [b * np, sq, sk]
+            attention_probs = attention_probs.view(output_size[0] * output_size[1],
+                                                   output_size[2], -1)
+    
+            # matmul: [b * np, sq, hn]
+            context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
+    
+            # change view [b, np, sq, hn]
+            context_layer = context_layer.view(*output_size)
 
         # [b, np, sq, hn] --> [sq, b, np, hn]
         context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
