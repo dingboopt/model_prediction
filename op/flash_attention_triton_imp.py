@@ -68,7 +68,7 @@ def _fwd_kernel(
     Q, K, V, Bias, Out,
     Lse, TMP,  # NOTE: TMP is a scratchpad buffer to workaround a compiler bug
     softmax_scale, seed,
-    pro: tl.constexpr,
+    pro,
     stride_qb, stride_qh, stride_qm,
     stride_kb, stride_kh, stride_kn,
     stride_vb, stride_vh, stride_vn,
@@ -81,16 +81,12 @@ def _fwd_kernel(
     BLOCK_HEADDIM: tl.constexpr,
     EVEN_M: tl.constexpr, EVEN_N: tl.constexpr, EVEN_HEADDIM: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+    HAS_DROPOUT: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     off_hb = tl.program_id(1)
     off_b = off_hb // nheads
     off_h = off_hb % nheads
-    
-    if pro > 0:
-        seed = 1
-        print('fuck')
-        seed = start_m + off_hb * 17 + seed 
     # off_b = tl.program_id(1)
     # off_h = tl.program_id(2)
     # off_hb = off_b * nheads + off_h
@@ -130,7 +126,8 @@ def _fwd_kernel(
                         other=0.0)
     # loop over k, v and update accumulator
     end_n = seqlen_k if not IS_CAUSAL else tl.minimum((start_m + 1) * BLOCK_M, seqlen_k)
-    if pro > 0:
+    if HAS_DROPOUT > 0:
+        print('fw: has droput')
         offset = tl.arange(0, BLOCK_M * BLOCK_N)
         r = tl.rand(seed, offset)
         keep_mask = r > pro
@@ -185,10 +182,9 @@ def _fwd_kernel(
         else:
             m_ij = tl.maximum(tl.max(qk, 1) * softmax_scale, lse_i)
             p = tl.exp(qk * softmax_scale - m_ij[:, None])
-
         l_ij = tl.sum(p, 1)
 
-        if pro > 0:
+        if HAS_DROPOUT:
             p = tl.where(keep, (p * p_scale), 0.)
         # scale acc_o
         acc_o_scale = tl.exp(m_i - m_ij)
@@ -301,7 +297,7 @@ def _bwd_kernel_one_col_block(
     Q, K, V, Bias,
     DO, DQ, DK, DV,
     LSE, D,
-    softmax_scale, seed, pro: tl.constexpr,
+    softmax_scale, seed, pro,
     stride_qm, stride_kn, stride_vn, stride_bm,
     stride_dom, stride_dqm, stride_dkn, stride_dvn,
     seqlen_q, seqlen_k, headdim,
@@ -310,7 +306,7 @@ def _bwd_kernel_one_col_block(
     IS_CAUSAL: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     EVEN_M: tl.constexpr, EVEN_N: tl.constexpr, EVEN_HEADDIM: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, HAS_DROPOUT: tl.constexpr
 ):
     # We need to make sure begin_m is a multiple of BLOCK_M (not BLOCK_N)
     begin_m = 0 if not IS_CAUSAL else ((start_n * BLOCK_N) // BLOCK_M) * BLOCK_M
@@ -362,8 +358,8 @@ def _bwd_kernel_one_col_block(
             v = tl.load(v_ptrs, mask=(offs_n[:, None] < seqlen_k) & (offs_d[None, :] < headdim),
                         other=0.0)
 
-    r = tl.zeros([BLOCK_M * BLOCK_N], dtype=tl.float32)
-    if pro > 0: 
+    if HAS_DROPOUT: 
+        print('bw: has droput')
         offset = tl.arange(0, BLOCK_M * BLOCK_N)
         r = tl.rand(seed, offset)
     # loop over rows
@@ -417,7 +413,7 @@ def _bwd_kernel_one_col_block(
 
         #### dropout ########
 
-        if pro > 0:
+        if HAS_DROPOUT:
             keep_mask = r > pro
             # prune and normalize in one go
             keep = tl.reshape(keep_mask, p.shape)
@@ -556,6 +552,7 @@ def _bwd_kernel(
     BIAS_TYPE: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
+    HAS_DROPOUT: tl.constexpr,
     SEQUENCE_PARALLEL: tl.constexpr,
     EVEN_M: tl.constexpr, EVEN_N: tl.constexpr, EVEN_HEADDIM: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
@@ -593,7 +590,7 @@ def _bwd_kernel(
                 IS_CAUSAL=IS_CAUSAL,
                 BLOCK_HEADDIM=BLOCK_HEADDIM,
                 EVEN_M=EVEN_M, EVEN_N=EVEN_N, EVEN_HEADDIM=EVEN_HEADDIM,
-                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N
+                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,HAS_DROPOUT=HAS_DROPOUT
             )
     else:
         start_n = tl.program_id(0)
@@ -611,7 +608,7 @@ def _bwd_kernel(
             IS_CAUSAL=IS_CAUSAL,
             BLOCK_HEADDIM=BLOCK_HEADDIM,
             EVEN_M=EVEN_M, EVEN_N=EVEN_N, EVEN_HEADDIM=EVEN_HEADDIM,
-            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N
+            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,HAS_DROPOUT=HAS_DROPOUT
         )
 
 
@@ -672,6 +669,7 @@ def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None, p=
         # IS_CAUSAL=causal, BLOCK_HEADDIM=d,
         bias_type, causal, BLOCK_HEADDIM,
         BLOCK_M=BLOCK, BLOCK_N=BLOCK,
+        HAS_DROPOUT=p>0,
         num_warps=num_warps,
         num_stages=1,
     )
@@ -722,7 +720,7 @@ def _flash_attn_backward(do, q, k, v, o, lse, dq, dk, dv, bias=None, causal=Fals
                                ' or (seqlen_q, seqlen_k)')
         bias = bias.expand(batch, nheads, seqlen_q, seqlen_k)
     bias_strides = (bias.stride(0), bias.stride(1), bias.stride(2)) if has_bias else (0, 0, 0)
-
+    HAS_DROPOUT = pro > 0
     # BLOCK_M = 128
     # BLOCK_N = 64
     # num_warps = 4
@@ -746,6 +744,7 @@ def _flash_attn_backward(do, q, k, v, o, lse, dq, dk, dv, bias=None, causal=Fals
         # Can't use kwargs here because triton autotune expects key to be args, not kwargs
         # IS_CAUSAL=causal, BLOCK_HEADDIM=d,
         bias_type, causal, BLOCK_HEADDIM,
+        HAS_DROPOUT,
         # SEQUENCE_PARALLEL=False,
         # BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         # num_warps=num_warps,
