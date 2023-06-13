@@ -187,6 +187,7 @@ class ParallelAttention(MegatronModule):
         # Dropout. Note that for a single iteration, this layer will generate
         # different outputs on different number of parallel partitions but
         # on average it should not be partition dependent.
+        self.dropout_p = args.attention_dropout
         self.attention_dropout = torch.nn.Dropout(args.attention_dropout)
 
         # Output.
@@ -206,7 +207,7 @@ class ParallelAttention(MegatronModule):
             self.rotary_emb = RotaryEmbedding(self.hidden_size_per_attention_head, precision=args.params_dtype)
 
     
-    def flash_attention(self, query_layer, key_layer, value_layer, matmul_result, output_size):
+    def flash_attention(self, query_layer, key_layer, value_layer, matmul_result, output_size, p):
         from .flash_attention_triton_imp import flash_attn_func
         # [sq, b, np, hn] -> [sq, b * np, hn]
         query_layer = query_layer.view(output_size[2],
@@ -224,7 +225,7 @@ class ParallelAttention(MegatronModule):
         matmul_result = matmul_result.view(output_size[0],-1,matmul_result.shape[1],matmul_result.shape[2]).contiguous()
         matmul_result = matmul_result[:,:,:,:]
 
-        context_layer = flash_attn_func(query_layer, key_layer, value_layer,matmul_result, True,1./self.norm_factor)
+        context_layer = flash_attn_func(query_layer, key_layer, value_layer,matmul_result, True,1./self.norm_factor, p)
         
 
         # =========================
@@ -331,7 +332,7 @@ class ParallelAttention(MegatronModule):
             query_layer, key_layer = apply_rotary_fn(query_layer, key_layer, cos, sin, offset=offset)
 
         if use_flash_att:
-            context_layer = self.flash_attention(query_layer, key_layer, value_layer, matmul_result, output_size)
+            context_layer = self.flash_attention(query_layer, key_layer, value_layer, matmul_result, output_size, self.dropout_p)
         else:
             # Raw attention scores. [b * np, sq, sk]
             if alibi is None:
