@@ -46,7 +46,9 @@ import torch
 import triton
 import triton.language as tl
 
-
+@triton.jit
+def _get_seed_offset(off_hb, start_m, start_n):
+    return off_hb * 1073741827 + start_m * 32767 + start_n
 # Disabling autotune for now, set num_warps=4 if headdim=64 and num_warps=8 if headdim=128
 # @triton.autotune(
 #     configs=[
@@ -128,13 +130,6 @@ def _fwd_kernel(
     end_n = seqlen_k if not IS_CAUSAL else tl.minimum((start_m + 1) * BLOCK_M, seqlen_k)
     if HAS_DROPOUT > 0:
         print('fw: has droput')
-        offset = tl.arange(0, BLOCK_M * BLOCK_N)
-        r = tl.rand(seed, offset)
-        keep_mask = r > pro
-        # prune and normalize in one go
-        keep = tl.reshape(keep_mask, (BLOCK_M, BLOCK_N))
-
-        p_scale = 1. / (1. - pro)
     for start_n in range(0, end_n, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
@@ -185,6 +180,14 @@ def _fwd_kernel(
         l_ij = tl.sum(p, 1)
 
         if HAS_DROPOUT:
+            offset_start = _get_seed_offset(off_hb, start_m, start_n) 
+            offset = offset_start + tl.arange(0, BLOCK_M * BLOCK_N)
+            r = tl.rand(seed, offset)
+            keep_mask = r > pro
+            # prune and normalize in one go
+            keep = tl.reshape(keep_mask, (BLOCK_M, BLOCK_N))
+
+            p_scale = 1. / (1. - pro)
             p = tl.where(keep, (p * p_scale), 0.)
         # scale acc_o
         acc_o_scale = tl.exp(m_i - m_ij)
@@ -297,7 +300,7 @@ def _bwd_kernel_one_col_block(
     Q, K, V, Bias,
     DO, DQ, DK, DV,
     LSE, D,
-    softmax_scale, seed, pro,
+    softmax_scale, seed, pro, off_hb,
     stride_qm, stride_kn, stride_vn, stride_bm,
     stride_dom, stride_dqm, stride_dkn, stride_dvn,
     seqlen_q, seqlen_k, headdim,
@@ -360,8 +363,6 @@ def _bwd_kernel_one_col_block(
 
     if HAS_DROPOUT: 
         print('bw: has droput')
-        offset = tl.arange(0, BLOCK_M * BLOCK_N)
-        r = tl.rand(seed, offset)
     # loop over rows
     num_block_m = tl.cdiv(seqlen_q, BLOCK_M)
     for start_m in range(begin_m, num_block_m * BLOCK_M, BLOCK_M):
@@ -414,6 +415,9 @@ def _bwd_kernel_one_col_block(
         #### dropout ########
 
         if HAS_DROPOUT:
+            offset_start = _get_seed_offset(off_hb, start_m, start_n) 
+            offset = offset_start + tl.arange(0, BLOCK_M * BLOCK_N)
+            r = tl.rand(seed, offset)
             keep_mask = r > pro
             # prune and normalize in one go
             keep = tl.reshape(keep_mask, p.shape)
@@ -581,7 +585,7 @@ def _bwd_kernel(
                 Q, K, V, Bias,
                 DO, DQ, DK, DV,
                 LSE, D,
-                softmax_scale, seed, pro,
+                softmax_scale, seed, pro, off_hb,
                 stride_qm, stride_kn, stride_vn, stride_bm,
                 stride_dom, stride_dqm, stride_dkn, stride_dvn,
                 seqlen_q, seqlen_k, headdim,
@@ -599,7 +603,7 @@ def _bwd_kernel(
             Q, K, V, Bias,
             DO, DQ, DK, DV,
             LSE, D,
-            softmax_scale, seed, pro,
+            softmax_scale, seed, pro, off_hb,
             stride_qm, stride_kn, stride_vn, stride_bm,
             stride_dom, stride_dqm, stride_dkn, stride_dvn,
             seqlen_q, seqlen_k, headdim,
