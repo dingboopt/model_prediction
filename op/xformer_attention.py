@@ -32,7 +32,9 @@ class PerfXformerAttention(PerfAttentionBase):
     def run_kernel(self):
         # Causal attention
         if self.bias != 0:
-            bias = xops.fmha.attn_bias.LowerTriangularMaskWithTensorBias(self.input4) 
+            #only forward supports LowerTriangularMaskWithTensorBias
+            bias = xops.fmha.attn_bias.LowerTriangularMaskWithTensorBias(self.input4)
+            bias = self.input4
         else:
             bias = xops.fmha.attn_bias.LowerTriangularMask()
 
