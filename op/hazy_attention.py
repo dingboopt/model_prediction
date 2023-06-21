@@ -35,13 +35,15 @@ class PerfHazyAttention(PerfAttentionBase):
         if self.op_index == 0:
             self.input1 = torch.rand((self.b , self.s,3,  self.a, self.h), device=cuda, dtype=torch.bfloat16,requires_grad=True)
         else:
+            
             self.input1 = torch.rand((self.b , self.s, self.a, self.h), device=cuda, dtype=torch.bfloat16,requires_grad=True)
             self.input2 = torch.rand((self.b , self.s, self.a, self.h), device=cuda, dtype=torch.bfloat16,requires_grad=True)
             
             self.input3 = torch.rand((self.b , self.s, self.a, self.h), device=cuda, dtype=torch.bfloat16,requires_grad=True)
-            self.input4 = torch.rand((self.b , self.a, self.s, self.s), device=cuda, dtype=torch.bfloat16)
-            self.input4 = torch.rand((1, self.a, self.s, self.s), device=cuda, dtype=torch.bfloat16)
+            #self.input4 = torch.rand((self.b , self.a, self.s, self.s), device=cuda, dtype=torch.bfloat16)
+            self.input4 = torch.rand((1, self.a, 1, self.s), device=cuda, dtype=torch.bfloat16)
     def run_kernel(self):
+        torch.manual_seed(0)
         if self.op_index == 0:
             #y=self.op.apply(self.input1, key_padding_mask=None, causal=True, cu_seqlens=None, max_s=None, need_weights=False)
             y=self.op(self.input1,                  None,        True,            None,       None,              False)[0]

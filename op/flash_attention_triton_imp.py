@@ -40,15 +40,16 @@ than CUDA forward + backward.
 """
 
 import math
-
+import os
 import torch
 
 import triton
 import triton.language as tl
+import numpy as np
 
 @triton.jit
 def _get_seed_offset(off_hb, start_m, start_n):
-    return off_hb * 1073741827 + start_m * 32767 + start_n
+    return off_hb * 32769 + start_m* 32767  + start_n + 1
 # Disabling autotune for now, set num_warps=4 if headdim=64 and num_warps=8 if headdim=128
 # @triton.autotune(
 #     configs=[
@@ -70,12 +71,13 @@ def _fwd_kernel(
     Q, K, V, Bias, Out,
     Lse, TMP,  # NOTE: TMP is a scratchpad buffer to workaround a compiler bug
     softmax_scale, seed,
-    pro,
+    pro, debug_tensor,
     stride_qb, stride_qh, stride_qm,
     stride_kb, stride_kh, stride_kn,
     stride_vb, stride_vh, stride_vn,
     stride_bb, stride_bh, stride_bm,
     stride_ob, stride_oh, stride_om,
+    debug_stride_b, debug_stride_h, debug_stride_s,
     nheads, seqlen_q, seqlen_k, seqlen_q_rounded, headdim,
     CACHE_KEY_SEQLEN_Q, CACHE_KEY_SEQLEN_K,
     BIAS_TYPE: tl.constexpr,
@@ -84,6 +86,8 @@ def _fwd_kernel(
     EVEN_M: tl.constexpr, EVEN_N: tl.constexpr, EVEN_HEADDIM: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     HAS_DROPOUT: tl.constexpr,
+    DEBUG: tl.constexpr,
+    FAST_RONDOM: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     off_hb = tl.program_id(1)
@@ -103,6 +107,8 @@ def _fwd_kernel(
     q_ptrs = Q + off_b * stride_qb + off_h * stride_qh + (offs_m[:, None] * stride_qm + offs_d[None, :])
     k_ptrs = K + off_b * stride_kb + off_h * stride_kh + (offs_n[:, None] * stride_kn + offs_d[None, :])
     v_ptrs = V + off_b * stride_vb + off_h * stride_vh + (offs_n[:, None] * stride_vn + offs_d[None, :])
+    if DEBUG:
+        debug_ptr = debug_tensor + off_b * debug_stride_b +  off_h * debug_stride_h + (offs_m[:,None] * debug_stride_s + offs_n[None,:]) 
     if BIAS_TYPE == 'vector':
         b_ptrs = Bias + off_b * stride_bb + off_h * stride_bh + offs_n
     elif BIAS_TYPE == 'matrix':
@@ -130,6 +136,18 @@ def _fwd_kernel(
     end_n = seqlen_k if not IS_CAUSAL else tl.minimum((start_m + 1) * BLOCK_M, seqlen_k)
     if HAS_DROPOUT > 0:
         print('fw: has droput')
+        
+        offset = tl.arange(0, BLOCK_M * BLOCK_N)
+        rint = tl.randint(seed, offset)
+        if FAST_RONDOM:
+            ra = rint# * _get_seed_offset(off_hb, start_m * BLOCK_M, start_n)
+            r = tl.uint32_to_uniform_float(ra)
+            
+            keep_mask = r > pro
+            # prune and normalize in one go
+            keep = tl.reshape(keep_mask, (BLOCK_M, BLOCK_N))
+            p_scale = 1. / (1. - pro)
+
     for start_n in range(0, end_n, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
@@ -180,15 +198,18 @@ def _fwd_kernel(
         l_ij = tl.sum(p, 1)
 
         if HAS_DROPOUT:
-            offset_start = _get_seed_offset(off_hb, start_m, start_n) 
-            offset = offset_start + tl.arange(0, BLOCK_M * BLOCK_N)
-            r = tl.rand(seed, offset)
-            keep_mask = r > pro
-            # prune and normalize in one go
-            keep = tl.reshape(keep_mask, (BLOCK_M, BLOCK_N))
-
-            p_scale = 1. / (1. - pro)
+            if not FAST_RONDOM:
+                ra = rint * _get_seed_offset(off_hb, start_m * BLOCK_M, start_n)
+                r = tl.uint32_to_uniform_float(ra)
+            
+                keep_mask = r > pro
+                # prune and normalize in one go
+                keep = tl.reshape(keep_mask, (BLOCK_M, BLOCK_N))
+                p_scale = 1. / (1. - pro)
             p = tl.where(keep, (p * p_scale), 0.)
+            if DEBUG:
+                r_copy = tl.reshape(r, (BLOCK_M, BLOCK_N))
+                tl.store(debug_ptr + start_n , r_copy)
         # scale acc_o
         acc_o_scale = tl.exp(m_i - m_ij)
 
@@ -300,16 +321,18 @@ def _bwd_kernel_one_col_block(
     Q, K, V, Bias,
     DO, DQ, DK, DV,
     LSE, D,
-    softmax_scale, seed, pro, off_hb,
+    softmax_scale, seed, pro,debug_tensor, off_hb,
     stride_qm, stride_kn, stride_vn, stride_bm,
     stride_dom, stride_dqm, stride_dkn, stride_dvn,
+    debug_stride_b,debug_stride_h,debug_stride_s,
     seqlen_q, seqlen_k, headdim,
     ATOMIC_ADD: tl.constexpr,
     BIAS_TYPE: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     EVEN_M: tl.constexpr, EVEN_N: tl.constexpr, EVEN_HEADDIM: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, HAS_DROPOUT: tl.constexpr
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, HAS_DROPOUT: tl.constexpr,
+    DEBUG: tl.constexpr, FAST_RONDOM: tl.constexpr,
 ):
     # We need to make sure begin_m is a multiple of BLOCK_M (not BLOCK_N)
     begin_m = 0 if not IS_CAUSAL else ((start_n * BLOCK_N) // BLOCK_M) * BLOCK_M
@@ -363,6 +386,21 @@ def _bwd_kernel_one_col_block(
 
     if HAS_DROPOUT: 
         print('bw: has droput')
+        offset = tl.arange(0, BLOCK_M * BLOCK_N)
+        rint = tl.randint(seed, offset)
+        if FAST_RONDOM:
+            ra = rint# * _get_seed_offset(off_hb, start_m, start_n*BLOCK_N)
+            r = tl.uint32_to_uniform_float(ra)
+            
+            keep_mask = r > pro
+            # prune and normalize in one go
+            keep = tl.reshape(keep_mask, (BLOCK_M, BLOCK_N))
+
+
+
+            p_scale = 1. / (1. - pro)
+    if DEBUG:
+        debug_ptr = debug_tensor + (offs_m[:,None] * debug_stride_s + offs_n[None,:]) 
     # loop over rows
     num_block_m = tl.cdiv(seqlen_q, BLOCK_M)
     for start_m in range(begin_m, num_block_m * BLOCK_M, BLOCK_M):
@@ -415,15 +453,19 @@ def _bwd_kernel_one_col_block(
         #### dropout ########
 
         if HAS_DROPOUT:
-            offset_start = _get_seed_offset(off_hb, start_m, start_n) 
-            offset = offset_start + tl.arange(0, BLOCK_M * BLOCK_N)
-            r = tl.rand(seed, offset)
-            keep_mask = r > pro
-            # prune and normalize in one go
-            keep = tl.reshape(keep_mask, p.shape)
-
-            p_scale = 1. / (1. - pro)
+            if not FAST_RONDOM:
+                ra = rint * _get_seed_offset(off_hb, start_m, start_n*BLOCK_N)
+                r = tl.uint32_to_uniform_float(ra)
+            
+                keep_mask = r > pro
+                # prune and normalize in one go
+                keep = tl.reshape(keep_mask, (BLOCK_M, BLOCK_N))
+                p_scale = 1. / (1. - pro)
+            
             p = tl.where(keep, (p*p_scale), 0.)
+            if DEBUG:
+                r_copy = tl.reshape(r, (BLOCK_M, BLOCK_N))
+                tl.store(debug_ptr + start_m * debug_stride_s , r_copy)
         ####################
 
         # compute dv
@@ -542,7 +584,7 @@ def _bwd_kernel(
     Q, K, V, Bias,
     DO, DQ, DK, DV,
     LSE, D,
-    softmax_scale, seed, pro,
+    softmax_scale, seed, pro, debug_tensor,
     stride_qb, stride_qh, stride_qm,
     stride_kb, stride_kh, stride_kn,
     stride_vb, stride_vh, stride_vn,
@@ -551,12 +593,15 @@ def _bwd_kernel(
     stride_dqb, stride_dqh, stride_dqm,
     stride_dkb, stride_dkh, stride_dkn,
     stride_dvb, stride_dvh, stride_dvn,
+    debug_stride_b,debug_stride_h,debug_stride_s,
     nheads, seqlen_q, seqlen_k, seqlen_q_rounded, headdim,
     CACHE_KEY_SEQLEN_Q, CACHE_KEY_SEQLEN_K,
     BIAS_TYPE: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     HAS_DROPOUT: tl.constexpr,
+    DEBUG: tl.constexpr,
+    FAST_RONDOM: tl.constexpr,
     SEQUENCE_PARALLEL: tl.constexpr,
     EVEN_M: tl.constexpr, EVEN_N: tl.constexpr, EVEN_HEADDIM: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
@@ -572,6 +617,9 @@ def _bwd_kernel(
     DQ += off_b * stride_dqb + off_h * stride_dqh
     DK += off_b * stride_dkb + off_h * stride_dkh
     DV += off_b * stride_dvb + off_h * stride_dvh
+    
+    if DEBUG:
+        debug_tensor += off_b * debug_stride_b + off_h * debug_stride_h
     if BIAS_TYPE != 'none':
         Bias += off_b * stride_bb + off_h * stride_bh
     # pointer to row-wise quantities in value-like data
@@ -585,16 +633,18 @@ def _bwd_kernel(
                 Q, K, V, Bias,
                 DO, DQ, DK, DV,
                 LSE, D,
-                softmax_scale, seed, pro, off_hb,
+                softmax_scale, seed, pro, debug_tensor, off_hb,
                 stride_qm, stride_kn, stride_vn, stride_bm,
                 stride_dom, stride_dqm, stride_dkn, stride_dvn,
+                debug_stride_b,debug_stride_h,debug_stride_s,
                 seqlen_q, seqlen_k, headdim,
                 ATOMIC_ADD=False,
                 BIAS_TYPE=BIAS_TYPE,
                 IS_CAUSAL=IS_CAUSAL,
                 BLOCK_HEADDIM=BLOCK_HEADDIM,
                 EVEN_M=EVEN_M, EVEN_N=EVEN_N, EVEN_HEADDIM=EVEN_HEADDIM,
-                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,HAS_DROPOUT=HAS_DROPOUT
+                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,HAS_DROPOUT=HAS_DROPOUT,
+                DEBUG=DEBUG, FAST_RONDOM=FAST_RONDOM,
             )
     else:
         start_n = tl.program_id(0)
@@ -603,16 +653,18 @@ def _bwd_kernel(
             Q, K, V, Bias,
             DO, DQ, DK, DV,
             LSE, D,
-            softmax_scale, seed, pro, off_hb,
+            softmax_scale, seed, pro, debug_tensor, off_hb,
             stride_qm, stride_kn, stride_vn, stride_bm,
             stride_dom, stride_dqm, stride_dkn, stride_dvn,
+            debug_stride_b,debug_stride_h,debug_stride_s,
             seqlen_q, seqlen_k, headdim,
             ATOMIC_ADD=True,
             BIAS_TYPE=BIAS_TYPE,
             IS_CAUSAL=IS_CAUSAL,
             BLOCK_HEADDIM=BLOCK_HEADDIM,
             EVEN_M=EVEN_M, EVEN_N=EVEN_N, EVEN_HEADDIM=EVEN_HEADDIM,
-            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,HAS_DROPOUT=HAS_DROPOUT
+            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,HAS_DROPOUT=HAS_DROPOUT,
+            DEBUG=DEBUG, FAST_RONDOM=FAST_RONDOM,
         )
 
 
@@ -651,8 +703,18 @@ def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None, p=
     tmp = torch.empty((batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32)
     o = torch.empty_like(q)
 
-    seed = torch.randint(65536, (1,), device=q.device, dtype=torch.int32)
+    seed = torch.randint(65536, (1,), device=q.device, dtype=torch.int32).item()
+    print(f'seed#### {seed}')
 
+    debug_tensor = None
+    debug_stride_b = debug_stride_h = debug_stride_s = 0
+    FAST_RONDOM = (os.environ.get("FAST_RONDOM") == '1')
+    DEBUG = (os.environ.get("DEBUG_FLASH_ATT") == '1')
+    if DEBUG:
+        debug_tensor = torch.zeros((batch, seqlen_q, nheads, seqlen_k), device=q.device, dtype=q.dtype)
+        debug_stride_b = debug_tensor.stride(0)
+        debug_stride_h = debug_tensor.stride(2)
+        debug_stride_s = debug_tensor.stride(1)
 
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
     BLOCK = 128
@@ -661,22 +723,26 @@ def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None, p=
     _fwd_kernel[grid](
         q, k, v, bias, o,
         lse, tmp,
-        softmax_scale, seed, p,
+        softmax_scale, seed, p, debug_tensor,
         q.stride(0), q.stride(2), q.stride(1),
         k.stride(0), k.stride(2), k.stride(1),
         v.stride(0), v.stride(2), v.stride(1),
         *bias_strides,
         o.stride(0), o.stride(2), o.stride(1),
+        debug_stride_b,debug_stride_h,debug_stride_s,
         nheads, seqlen_q, seqlen_k, seqlen_q_rounded, d,
         seqlen_q // 32,  seqlen_k // 32, # key for triton cache (limit number of compilations)
         # Can't use kwargs here because triton autotune expects key to be args, not kwargs
         # IS_CAUSAL=causal, BLOCK_HEADDIM=d,
         bias_type, causal, BLOCK_HEADDIM,
         BLOCK_M=BLOCK, BLOCK_N=BLOCK,
-        HAS_DROPOUT=p>0,
+        HAS_DROPOUT=p>0,DEBUG=DEBUG,FAST_RONDOM=FAST_RONDOM,
         num_warps=num_warps,
         num_stages=1,
     )
+    if DEBUG:
+        array = debug_tensor.float().cpu().numpy()
+        np.save('fw_debug.npy', array)
     return o, lse, softmax_scale, seed  # softmax_scale could have been updated
 
 
@@ -730,11 +796,20 @@ def _flash_attn_backward(do, q, k, v, o, lse, dq, dk, dv, bias=None, causal=Fals
     # num_warps = 4
     grid = lambda META: (triton.cdiv(seqlen_k, META["BLOCK_N"]) if META["SEQUENCE_PARALLEL"] else 1,
                     batch * nheads)
+    FAST_RONDOM = (os.environ.get("FAST_RONDOM") == '1')          
+    DEBUG = (os.environ.get("DEBUG_FLASH_ATT") == '1')
+    debug_tensor = None
+    debug_stride_b = debug_stride_h = debug_stride_s = 0
+    if DEBUG:
+        debug_tensor = torch.zeros((batch, seqlen_q, nheads, seqlen_k), device=q.device, dtype=q.dtype)
+        debug_stride_b = debug_tensor.stride(0)
+        debug_stride_h = debug_tensor.stride(2)
+        debug_stride_s = debug_tensor.stride(1)
     _bwd_kernel[grid](
         q, k, v, bias,
         do, dq_accum, dk, dv,
         lse, delta,
-        softmax_scale, seed, pro,
+        softmax_scale, seed, pro, debug_tensor,
         q.stride(0), q.stride(2), q.stride(1),
         k.stride(0), k.stride(2), k.stride(1),
         v.stride(0), v.stride(2), v.stride(1),
@@ -743,17 +818,21 @@ def _flash_attn_backward(do, q, k, v, o, lse, dq, dk, dv, bias=None, causal=Fals
         dq_accum.stride(0), dq_accum.stride(2), dq_accum.stride(1),
         dk.stride(0), dk.stride(2), dk.stride(1),
         dv.stride(0), dv.stride(2), dv.stride(1),
+        debug_stride_b,debug_stride_h,debug_stride_s,
         nheads, seqlen_q, seqlen_k, seqlen_q_rounded, d,
         seqlen_q // 32,  seqlen_k // 32, # key for triton cache (limit number of compilations)
         # Can't use kwargs here because triton autotune expects key to be args, not kwargs
         # IS_CAUSAL=causal, BLOCK_HEADDIM=d,
         bias_type, causal, BLOCK_HEADDIM,
-        HAS_DROPOUT,
+        HAS_DROPOUT, DEBUG,FAST_RONDOM,
         # SEQUENCE_PARALLEL=False,
         # BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         # num_warps=num_warps,
         # num_stages=1,
     )
+    if DEBUG:
+        array = debug_tensor.float().cpu().numpy()
+        np.save('bw_debug.npy', array)
     dq.copy_(dq_accum)
 
 
@@ -847,17 +926,18 @@ class FlashAttnFunc(torch.autograd.Function):
         """
         # Make sure that the last dimension is contiguous
         q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
-        o, lse, ctx.softmax_scale, seed = _flash_attn_forward(
+        o, lse, ctx.softmax_scale, ctx.seed = _flash_attn_forward(
             q, k, v, bias=bias, causal=causal, softmax_scale=softmax_scale, p=p
         )
-        ctx.save_for_backward(q, k, v, o, lse, bias, seed)
+        ctx.save_for_backward(q, k, v, o, lse, bias)
         ctx.causal = causal
         ctx.p = p
         return o
 
     @staticmethod
     def backward(ctx, do):
-        q, k, v, o, lse, bias, seed = ctx.saved_tensors
+        q, k, v, o, lse, bias = ctx.saved_tensors
+
         assert not ctx.needs_input_grad[3], 'FlashAttention does not support bias gradient yet'
         # Triton's autotune causes the Tensor._version to change, and so Pytorch autograd
         # does a memcpy. To avoid this we run in inference_mode, which doesn't track the version.
@@ -866,7 +946,7 @@ class FlashAttnFunc(torch.autograd.Function):
             dk = torch.empty_like(k)
             dv = torch.empty_like(v)
             _flash_attn_backward(do, q, k, v, o, lse, dq, dk, dv,
-                                 bias=bias, causal=ctx.causal, softmax_scale=ctx.softmax_scale, seed=seed, pro=ctx.p)
+                                 bias=bias, causal=ctx.causal, softmax_scale=ctx.softmax_scale, seed=ctx.seed, pro=ctx.p)
         return dq, dk, dv, None, None, None, None
 
 
